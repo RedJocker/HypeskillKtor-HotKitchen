@@ -1,0 +1,1004 @@
+type: edu
+files:
+- name: build.gradle
+  visible: true
+  text: |-
+    buildscript {
+        repositories {
+            mavenCentral()
+        }
+        dependencies {
+            classpath "org.jetbrains.kotlin:kotlin-serialization:1.6.21"
+        }
+    }
+    def ktor_version = "1.6.7"
+
+    apply plugin: 'java'
+    apply plugin: 'org.jetbrains.kotlin.jvm'
+    apply plugin: 'kotlin'
+    apply plugin: 'kotlinx-serialization'
+
+    repositories {
+        mavenCentral()
+    }
+
+
+    sourceSets.main.resources.srcDirs = ["src/resources"]
+
+    dependencies {
+        implementation "org.jetbrains.kotlin:kotlin-stdlib"
+        implementation "io.ktor:ktor-server-core:$ktor_version"
+        implementation "io.ktor:ktor-server-netty:$ktor_version"
+        implementation("ch.qos.logback:logback-classic:1.2.10")
+
+        implementation "io.ktor:ktor-serialization:$ktor_version"
+        implementation('org.jetbrains.exposed:exposed-core:0.37.3')
+        implementation('org.jetbrains.exposed:exposed-dao:0.37.3')
+        implementation('org.jetbrains.exposed:exposed-jdbc:0.37.3')
+        implementation('com.zaxxer:HikariCP:5.0.1')
+        implementation("org.postgresql:postgresql:42.3.2")
+    }
+  learner_created: false
+- name: src/resources/application.conf
+  visible: true
+  text: |-
+    ktor {
+        deployment {
+            port = 28888
+        }
+        application {
+            modules = [hotkitchen.ApplicationKt.module]
+        }
+    }
+  learner_created: false
+- name: src/Application.kt
+  visible: true
+  text: |-
+    package hotkitchen
+
+    import io.ktor.application.*
+
+    fun main(args: Array<String>): Unit = io.ktor.server.netty.EngineMain.main(args)
+
+    fun Application.module(testing: Boolean = false) {}
+  learner_created: false
+- name: test/HotKitchenTest.kt
+  visible: false
+  text: |-
+    import com.typesafe.config.ConfigFactory
+    import io.ktor.config.*
+    import io.ktor.http.*
+    import io.ktor.server.testing.*
+    import kotlinx.serialization.Serializable
+    import kotlinx.serialization.decodeFromString
+    import kotlinx.serialization.encodeToString
+    import kotlinx.serialization.json.Json
+    import org.hyperskill.hstest.dynamic.DynamicTest
+    import org.hyperskill.hstest.stage.StageTest
+    import org.hyperskill.hstest.testcase.CheckResult
+
+    class HotKitchenTest : StageTest<Any>() {
+
+        @Serializable
+        private data class Credentials(var email: String, var userType: String, var password: String)
+
+        @Serializable
+        private data class User(
+            val name: String, val userType: String, val phone: String, val email: String, val address: String
+        )
+
+        private fun User.isEquals(user: User) =
+            name == user.name && userType == user.userType && phone == user.phone && email == user.email && address == user.address
+
+
+        @Serializable
+        private data class Token(val token: String)
+
+        private val time = System.currentTimeMillis().toString()
+        private val jwtRegex = """^[a-zA-Z0-9]+?\.[a-zA-Z0-9]+?\..+""".toRegex()
+        private val currentCredentials = Credentials("$time@mail.com", "client", "password$time")
+        private var currentUser = User(time + "name", "client", "+79999999999", currentCredentials.email, time + "address")
+        private lateinit var signInToken: String
+
+
+        @DynamicTest(order = 1)
+        fun getSignInJWTToken(): CheckResult = withApplication(createTestEnvironment {
+            config = HoconApplicationConfig(ConfigFactory.load("application.conf"))
+        }) {
+            with(handleRequest(HttpMethod.Post, "/signup") {
+                setBody(Json.encodeToString(currentCredentials))
+                addHeader(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+            }) {
+                try {
+                    val principal = Json.decodeFromString<Token>(response.content ?: "")
+                    signInToken = principal.token
+                    if (!signInToken.matches(jwtRegex) || signInToken.contains(currentCredentials.email)) return@withApplication CheckResult.wrong(
+                        "Invalid JWT token"
+                    )
+                } catch (e: Exception) {
+                    return@withApplication CheckResult.wrong("Cannot get token form /signin request")
+                }
+            }
+            return@withApplication CheckResult.correct()
+        }
+
+        @DynamicTest(order = 2)
+        fun correctValidation(): CheckResult = withApplication(createTestEnvironment {
+            config = HoconApplicationConfig(ConfigFactory.load("application.conf"))
+        }) {
+            with(handleRequest(HttpMethod.Get, "/validate") {
+                addHeader(HttpHeaders.Authorization, "Bearer $signInToken")
+            }) {
+                if (response.status() != HttpStatusCode.OK || response.content != "Hello, ${currentCredentials.userType} ${currentCredentials.email}") return@withApplication CheckResult.wrong(
+                    "Token validation with signin token failed.\nStatus code should be \"200 OK\"\nMessage should be \"Hello, ${currentCredentials.userType} ${currentCredentials.email}\""
+                )
+            }
+            return@withApplication CheckResult.correct()
+        }
+
+        @DynamicTest(order = 3)
+        fun getNonExistentUser(): CheckResult = withApplication(createTestEnvironment {
+            config = HoconApplicationConfig(ConfigFactory.load("application.conf"))
+        }) {
+            with(handleRequest(HttpMethod.Get, "/me") {
+                addHeader(HttpHeaders.Authorization, "Bearer $signInToken")
+            }) {
+                if (response.status() != HttpStatusCode.BadRequest) return@withApplication CheckResult.wrong("Status code for a getting non-existent user should be \"400 Bad Request\"")
+            }
+            return@withApplication CheckResult.correct()
+        }
+
+        @DynamicTest(order = 4)
+        fun createUser(): CheckResult = withApplication(createTestEnvironment {
+            config = HoconApplicationConfig(ConfigFactory.load("application.conf"))
+        }) {
+            with(handleRequest(HttpMethod.Put, "/me") {
+                setBody(Json.encodeToString(currentUser))
+                addHeader(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+                addHeader(HttpHeaders.Authorization, "Bearer $signInToken")
+            }) {
+                if (response.status() != HttpStatusCode.OK)
+                    return@withApplication CheckResult.wrong("Cannot add user by put method")
+            }
+            return@withApplication CheckResult.correct()
+        }
+
+        @DynamicTest(order = 5)
+        fun getExistentUser(): CheckResult = withApplication(createTestEnvironment {
+            config = HoconApplicationConfig(ConfigFactory.load("application.conf"))
+        }) {
+            with(handleRequest(HttpMethod.Get, "/me") {
+                addHeader(HttpHeaders.Authorization, "Bearer $signInToken")
+            }) {
+                val user = Json.decodeFromString<User>(response.content ?: "")
+                if (!user.isEquals(currentUser)) return@withApplication CheckResult.wrong("Get method responded with different user information.")
+                if (response.status() != HttpStatusCode.OK) return@withApplication CheckResult.wrong("Status code for a getting existent user should be \"200 OK\"")
+            }
+            return@withApplication CheckResult.correct()
+        }
+
+        @DynamicTest(order = 6)
+        fun putDifferentEmail(): CheckResult = withApplication(createTestEnvironment {
+            config = HoconApplicationConfig(ConfigFactory.load("application.conf"))
+        }) {
+            with(handleRequest(HttpMethod.Put, "/me") {
+                val newUser = currentUser.copy(email = "different@mail.com")
+                setBody(Json.encodeToString(newUser))
+                addHeader(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+                addHeader(HttpHeaders.Authorization, "Bearer $signInToken")
+            }) {
+                if (response.status() != HttpStatusCode.BadRequest)
+                    return@withApplication CheckResult.wrong("You can not change the user's email! Wrong status code.")
+            }
+            return@withApplication CheckResult.correct()
+        }
+
+        @DynamicTest(order = 7)
+        fun updateCurrentUser(): CheckResult = withApplication(createTestEnvironment {
+            config = HoconApplicationConfig(ConfigFactory.load("application.conf"))
+        }) {
+            with(handleRequest(HttpMethod.Put, "/me") {
+                currentUser = currentUser.copy(name = "newName$time", userType = "newType", address = "newAddress$time")
+                setBody(Json.encodeToString(currentUser))
+                addHeader(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+                addHeader(HttpHeaders.Authorization, "Bearer $signInToken")
+            }) {
+                if (response.status() != HttpStatusCode.OK)
+                    return@withApplication CheckResult.wrong("Cannot update user information by put method")
+            }
+            return@withApplication CheckResult.correct()
+        }
+
+        @DynamicTest(order = 8)
+        fun getNewExistentUser(): CheckResult = withApplication(createTestEnvironment {
+            config = HoconApplicationConfig(ConfigFactory.load("application.conf"))
+        }) {
+            with(handleRequest(HttpMethod.Get, "/me") {
+                addHeader(HttpHeaders.Authorization, "Bearer $signInToken")
+            }) {
+                val user = Json.decodeFromString<User>(response.content ?: "")
+                if (!user.isEquals(currentUser)) return@withApplication CheckResult.wrong("Get method responded with different user information after updating user info.")
+                if (response.status() != HttpStatusCode.OK) return@withApplication CheckResult.wrong("Status code for a getting existent user should be \"200 OK\"")
+            }
+            return@withApplication CheckResult.correct()
+        }
+
+        @DynamicTest(order = 9)
+        fun deleteExistentUser(): CheckResult = withApplication(createTestEnvironment {
+            config = HoconApplicationConfig(ConfigFactory.load("application.conf"))
+        }) {
+            with(handleRequest(HttpMethod.Delete, "/me") {
+                addHeader(HttpHeaders.Authorization, "Bearer $signInToken")
+            }) {
+                if (response.status() != HttpStatusCode.OK)
+                    return@withApplication CheckResult.wrong("Status code for a deleting existent user should be \"200 OK\"")
+            }
+            return@withApplication CheckResult.correct()
+        }
+
+        @DynamicTest(order = 10)
+        fun deleteNonExistentUser(): CheckResult = withApplication(createTestEnvironment {
+            config = HoconApplicationConfig(ConfigFactory.load("application.conf"))
+        }) {
+            with(handleRequest(HttpMethod.Delete, "/me") {
+                addHeader(HttpHeaders.Authorization, "Bearer $signInToken")
+            }) {
+                if (response.status() != HttpStatusCode.BadRequest)
+                    return@withApplication CheckResult.wrong("Status code for a deleting non-existent user should be \"400 Bad Request\"")
+            }
+            return@withApplication CheckResult.correct()
+        }
+
+        @DynamicTest(order = 11)
+        fun getDeletedUser(): CheckResult = withApplication(createTestEnvironment {
+            config = HoconApplicationConfig(ConfigFactory.load("application.conf"))
+        }) {
+            with(handleRequest(HttpMethod.Get, "/me") {
+                addHeader(HttpHeaders.Authorization, "Bearer $signInToken")
+            }) {
+                if (response.status() != HttpStatusCode.BadRequest)
+                    return@withApplication CheckResult.wrong("Status code for a getting deleted user should be \"400 Bad Request\"")
+            }
+            return@withApplication CheckResult.correct()
+        }
+
+        @DynamicTest(order = 12)
+        fun checkDeletedCredentials(): CheckResult = withApplication(createTestEnvironment {
+            config = HoconApplicationConfig(ConfigFactory.load("application.conf"))
+        }) {
+            with(handleRequest(HttpMethod.Post, "/signup") {
+                setBody(Json.encodeToString(currentCredentials))
+                addHeader(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+            }) {
+                if (response.status() != HttpStatusCode.OK)
+                    return@withApplication CheckResult.wrong("Unable to signin after deleting user information. Did you forget to delete user credentials?")
+            }
+            return@withApplication CheckResult.correct()
+        }
+    }
+  learner_created: false
+- name: src/presentation/routing/AuthRouting.kt
+  visible: true
+  text: |-
+    package hotkitchen.presentation.routing
+
+    import hotkitchen.domain.exception.UnauthorizedAccessException
+    import hotkitchen.presentation.routing.requestDto.SignInRequest
+    import hotkitchen.presentation.routing.requestDto.SignUpRequest
+    import hotkitchen.domain.service.tokenService.TokenService
+    import hotkitchen.domain.service.UserService
+    import io.ktor.application.*
+    import io.ktor.http.*
+    import io.ktor.request.*
+    import io.ktor.response.*
+    import io.ktor.routing.*
+
+    object AuthRouting {
+
+        fun Routing.authRouting(userService: UserService, tokenService: TokenService) {
+            post("/signup") {
+                val signupRequest = call.receive<SignUpRequest>()
+                println("requestBody $signupRequest")
+
+                val response = userService.signUpUser(signupRequest)
+                call.respond(HttpStatusCode.OK, response)
+            }
+
+            post("/signin") {
+                val signinRequest = call.receive<SignInRequest>()
+                println("requestBody $signinRequest")
+
+                val response = userService.signInUser(signinRequest)
+                call.respond(HttpStatusCode.OK, response)
+            }
+
+            get("/validate") {
+                println("headers ${call.request.headers}")
+
+                val tokenString = call.request.headers["Authorization"].let {
+                    if(it?.startsWith("Bearer ") != true) {
+                        throw UnauthorizedAccessException()
+                    }
+                    it.substringAfter(' ')
+                }
+
+
+                if(tokenService.isValidToken(tokenString)) {
+                    val (userType, email) = tokenService.decodeToken(tokenString)
+                    call.respond(HttpStatusCode.OK, "Hello, $userType ${email.replace('_', '@')}")
+                } else {
+                    call.respond(HttpStatusCode.Unauthorized, "")
+                }
+
+            }
+        }
+    }
+  learner_created: true
+- name: src/presentation/routing/requestDto/SignUpRequest.kt
+  visible: true
+  text: |-
+    package hotkitchen.presentation.routing.requestDto
+
+    import hotkitchen.domain.model.User
+    import kotlinx.serialization.Serializable
+
+    @Serializable
+    data class SignUpRequest (
+        val email: String,
+        val userType: User.Type,
+        val password: String,
+    )
+  learner_created: true
+- name: src/presentation/routing/responseDto/SignupResponse.kt
+  visible: true
+  text: |-
+    package hotkitchen.presentation.routing.responseDto
+
+    import kotlinx.serialization.SerialName
+    import kotlinx.serialization.Serializable
+
+    @Serializable
+    data class SignupResponse(
+        val status: Status
+    ): ApiResponse {
+        @Serializable
+        enum class Status {
+            @SerialName("Signed In") SIGNED_UP,
+            @SerialName("Registration failed") REGISTRATION_FAILED,
+            @SerialName("Invalid email") INVALID_EMAIL,
+            @SerialName("Invalid password") INVALID_PASS,
+            @SerialName("User already exists") DUPLICATED_USER
+            ;
+        }
+    }
+  learner_created: true
+- name: src/util/Validation.kt
+  visible: true
+  text: |-
+    package hotkitchen.util
+
+    object Validation {
+
+        fun String.isNotValidEmail(): Boolean {
+            return "(\\w+[\\w.\\-])*\\w+@([A-Za-z0-9]+\\.)+[A-Za-z]{2,}".toRegex().matches(this).not()
+        }
+
+        fun String.isNotValidPass(): Boolean {
+            return length < 6 || containsNoDigits() || containsNoLetter()
+        }
+
+        private fun String.containsNoDigits(): Boolean {
+            return firstOrNull(Char::isDigit) == null
+        }
+
+        private fun String.containsNoLetter(): Boolean {
+            return firstOrNull(Char::isLetter) == null
+        }
+    }
+  learner_created: true
+- name: src/presentation/routing/responseDto/SignInResponse.kt
+  visible: true
+  text: |-
+    package hotkitchen.presentation.routing.responseDto
+
+    import kotlinx.serialization.SerialName
+    import kotlinx.serialization.Serializable
+
+    @Serializable
+    data class SignInResponse (
+        val status: Status
+    ): ApiResponse {
+        @Serializable
+        enum class Status {
+            @SerialName("Signed Up") SIGNED_IN,
+            @SerialName("Authorization failed") AUTHORIZATION_FAILED,
+            @SerialName("Invalid email or password") INVALID_SIGNIN,
+            ;
+        }
+    }
+  learner_created: true
+- name: src/presentation/routing/responseDto/ApiResponse.kt
+  visible: true
+  text: |-
+    package hotkitchen.presentation.routing.responseDto
+
+    interface ApiResponse
+  learner_created: true
+- name: src/domain/exception/SignupExistingUserException.kt
+  visible: true
+  text: |-
+    package hotkitchen.domain.exception
+
+    class SignupExistingUserException(
+        override val message: String = "There is already an user with that email registered"): Exception(message)
+  learner_created: true
+- name: src/data/repository/database/exposed/UserEntity.kt
+  visible: true
+  text: |-
+    package hotkitchen.data.repository.database.exposed
+
+    import hotkitchen.domain.model.User
+    import org.jetbrains.exposed.dao.IntEntity
+    import org.jetbrains.exposed.dao.IntEntityClass
+    import org.jetbrains.exposed.dao.id.EntityID
+
+    class UserEntity(id: EntityID<Int>) : IntEntity(id) {
+        companion object : IntEntityClass<UserEntity>(UsersTable)
+
+        var email: String by UsersTable.email
+        var password: String by UsersTable.password
+        var userType: String by UsersTable.userType
+
+        fun toUser(): User {
+            return User(email, User.Type.valueOf(userType), password)
+        }
+    }
+  learner_created: true
+- name: src/Controller.kt
+  visible: true
+  text: |-
+    package hotkitchen
+
+    import hotkitchen.presentation.routing.AuthRouting.authRouting
+    import hotkitchen.presentation.routing.ErrorRouting.errorRouting
+    import hotkitchen.domain.service.tokenService.TokenService
+    import hotkitchen.domain.service.UserService
+    import hotkitchen.util.CustomLoggerPlugin
+    import io.ktor.application.*
+    import io.ktor.auth.*
+    import io.ktor.auth.jwt.*
+    import io.ktor.features.*
+    import io.ktor.routing.*
+    import io.ktor.serialization.*
+
+
+    object Controller {
+        fun Application.controller(userService: UserService, tokenService: TokenService, testing: Boolean) {
+
+            install(Routing) {
+    //        trace {
+    //            //application.log.trace(it.buildText())
+    //            println(it.buildText())
+    //        }
+                authRouting(userService, tokenService)
+            }
+
+
+            install(ContentNegotiation) {
+                json()
+            }
+
+            install(CustomLoggerPlugin)
+
+            install(StatusPages){
+                errorRouting()
+            }
+        }
+    }
+  learner_created: true
+- name: src/domain/exception/SignupInvalidEmailException.kt
+  visible: true
+  text: |-
+    package hotkitchen.domain.exception
+
+    class SignupInvalidEmailException(
+        override val message: String =
+            "A valid email address consists of an email prefix and an email domain, both in acceptable formats. " +
+                    "Use only letters, numbers, and special symbols:"
+    ): Exception(message)
+  learner_created: true
+- name: src/domain/exception/SigninAuthorizationFail.kt
+  visible: true
+  text: |-
+    package hotkitchen.domain.exception
+
+    class SigninAuthorizationFail(
+        override val message: String = "Failed authorization"): Exception(message)
+  learner_created: true
+- name: src/domain/service/tokenService/TokenService.kt
+  visible: true
+  text: |-
+    package hotkitchen.domain.service.tokenService
+
+    import hotkitchen.domain.model.User
+
+    interface TokenService {
+
+        fun isValidToken(tokenString: String): Boolean
+
+        fun produceToken(userType: User.Type, email: String): String
+
+        fun decodeToken(tokenString: String): Pair<String, String>
+    }
+  learner_created: true
+- name: src/domain/exception/SignupInvalidPasswordException.kt
+  visible: true
+  text: |-
+    package hotkitchen.domain.exception
+
+    class SignupInvalidPasswordException(
+        override val message: String =
+            "A valid password is a password that is at least six characters long and consists of letters and numbers"
+    ): Exception(message)
+  learner_created: true
+- name: src/util/CustomLoggerPlugin.kt
+  visible: true
+  text: |-
+    package hotkitchen.util
+
+    import io.ktor.application.*
+    import io.ktor.features.*
+    import io.ktor.http.*
+    import io.ktor.response.*
+    import io.ktor.util.*
+
+    class CustomLoggerPlugin {
+
+        class Configuration
+
+        companion object Plugin : ApplicationFeature<ApplicationCallPipeline, Configuration, CustomLoggerPlugin> {
+            override val key = AttributeKey<CustomLoggerPlugin>("CustomLoggerPlugin")
+            override fun install(pipeline: ApplicationCallPipeline, configure: Configuration.() -> Unit): CustomLoggerPlugin {
+                val plugin = CustomLoggerPlugin()
+
+                pipeline.intercept(ApplicationCallPipeline.Monitoring) { data ->
+                    println("call: ${context.request.toLogString()}")
+                    proceedWith(subject)
+                }
+
+                pipeline.sendPipeline.intercept(ApplicationSendPipeline.Transform) { data ->
+                    val dataString = if(data is Unit) "" else ", $data"
+                    println("response: ${call.response.status() ?: ""}$dataString")
+                    proceedWith(subject)
+                }
+
+                return plugin
+            }
+        }
+    }
+  learner_created: true
+- name: src/domain/service/tokenService/custom/CustomTokenService.kt
+  visible: true
+  text: |-
+    package hotkitchen.domain.service.tokenService.custom
+
+    import hotkitchen.domain.model.User
+    import hotkitchen.domain.service.tokenService.TokenService
+
+    class CustomTokenService: TokenService {
+
+        override fun isValidToken(tokenString: String): Boolean {
+            return tokenString.startsWith("abc.")
+        }
+
+        override fun produceToken(userType: User.Type, email: String): String {
+            return "abc.${userType.value}.${email.replace('.', '*')}"
+        }
+
+        override fun decodeToken(tokenString: String): Pair<String, String>{
+            val (userType, email) = "^abc\\.(.*)\\.(.*)$".toRegex()
+                .matchEntire(tokenString)!!.destructured
+            return userType to email.replace('*', '.')
+        }
+    }
+  learner_created: true
+- name: src/domain/exception/DatabaseException.kt
+  visible: true
+  text: |
+    package hotkitchen.domain.exception
+
+    class DatabaseException(
+        override val message: String = "Database failed") : Exception(message)
+  learner_created: true
+- name: src/domain/model/User.kt
+  visible: true
+  text: |
+    package hotkitchen.domain.model
+
+    import kotlinx.serialization.SerialName
+    import kotlinx.serialization.Serializable
+
+    @Serializable
+    data class User (
+        val email: String,
+        val type: Type,
+        val password: String,
+    ) {
+        @Serializable
+        @Suppress("unused")
+        enum class Type(val value: String) {
+            @SerialName("staff") STAFF("staff"),
+            @SerialName("testUser") TEST_USER("testUser"),
+            @SerialName("client") CLIENT("client"),
+            ;
+        }
+    }
+  learner_created: true
+- name: src/domain/exception/UnauthorizedAccessException.kt
+  visible: true
+  text: |-
+    package hotkitchen.domain.exception
+
+    class UnauthorizedAccessException(
+        override val message: String = "Unauthorized Access"): Exception(message)
+  learner_created: true
+- name: src/presentation/routing/ErrorRouting.kt
+  visible: true
+  text: |-
+    package hotkitchen.presentation.routing
+
+    import hotkitchen.domain.exception.*
+    import hotkitchen.presentation.routing.responseDto.SignInResponse
+    import hotkitchen.presentation.routing.responseDto.SignInResponse.Status.INVALID_SIGNIN
+    import hotkitchen.presentation.routing.responseDto.SignupResponse
+    import hotkitchen.presentation.routing.responseDto.SignupResponse.Status.*
+    import io.ktor.application.*
+    import io.ktor.features.*
+    import io.ktor.http.*
+    import io.ktor.response.*
+
+    object ErrorRouting {
+        fun StatusPages.Configuration.errorRouting() {
+
+            exception<SignupExistingUserException> { cause ->
+                logException(cause)
+                call.respond(HttpStatusCode.Forbidden, SignupResponse(DUPLICATED_USER))
+            }
+
+            exception<SignupInvalidEmailException> { cause ->
+                logException(cause)
+                call.respond(HttpStatusCode.Forbidden, SignupResponse(INVALID_EMAIL))
+            }
+
+            exception<SignupInvalidPasswordException> { cause ->
+                logException(cause)
+                call.respond(HttpStatusCode.Forbidden, SignupResponse(INVALID_PASS))
+            }
+
+            exception<DatabaseException> { cause ->
+                logException(cause)
+                call.respond(HttpStatusCode.InternalServerError, mapOf("error" to cause.localizedMessage))
+            }
+
+            exception<SigninAuthorizationFail> { cause ->
+                logException(cause)
+                call.respond(HttpStatusCode.Forbidden, SignInResponse(INVALID_SIGNIN))
+            }
+
+            exception<UnauthorizedAccessException> { cause ->
+                logException(cause)
+                call.respond(HttpStatusCode.Unauthorized, HttpStatusCode.Unauthorized)
+            }
+        }
+
+        private fun logException(cause: Exception) {
+            println("Exception: ${cause.localizedMessage}")
+            //cause.printStackTrace()
+        }
+    }
+  learner_created: true
+- name: src/presentation/routing/responseDto/TokenResponse.kt
+  visible: true
+  text: |-
+    package hotkitchen.presentation.routing.responseDto
+
+    import kotlinx.serialization.Serializable
+
+    @Serializable
+    data class TokenResponse(val token: String = "abc.def.***") : ApiResponse
+  learner_created: true
+- name: src/data/repository/database/exposed/ExposedDatabaseConnection.kt
+  visible: true
+  text: |-
+    package hotkitchen.data.repository.database.exposed
+
+    import org.jetbrains.exposed.sql.Database
+    import org.jetbrains.exposed.sql.SchemaUtils
+    import org.jetbrains.exposed.sql.StdOutSqlLogger
+    import org.jetbrains.exposed.sql.addLogger
+    import org.jetbrains.exposed.sql.transactions.transaction
+
+    class ExposedDatabaseConnection {
+        val database = Database.connect("jdbc:h2:mem:regular;DB_CLOSE_DELAY=-1;", "org.h2.Driver")
+
+        init {
+            transaction(database) {
+                SchemaUtils.create(UsersTable)
+                addLogger(StdOutSqlLogger)
+            }
+        }
+    }
+  learner_created: true
+- name: src/domain/service/tokenService/jwtToken/JwtTokenService.kt
+  visible: true
+  text: |-
+    package hotkitchen.domain.service.tokenService.jwtToken
+
+    import com.auth0.jwt.JWT
+    import com.auth0.jwt.JWTVerifier
+    import com.auth0.jwt.algorithms.Algorithm
+    import hotkitchen.domain.model.User
+    import hotkitchen.domain.service.tokenService.TokenService
+    import io.ktor.application.*
+    import java.util.*
+
+    class JwtTokenService(environment: ApplicationEnvironment): TokenService {
+
+        private val secret = environment.config.property("jwt.secret").getString()
+        private val issuer = environment.config.property("jwt.issuer").getString()
+        private val audience = environment.config.property("jwt.audience").getString()
+        private val myRealm = environment.config.property("jwt.realm").getString()
+        private val expirationTime = 1000 * 60 * 10
+        private val algorithm = Algorithm.HMAC256(secret)
+        private val jwtVerifier = JWT.require(algorithm)
+            .withAudience(audience)
+            .withIssuer(issuer)
+            .withClaimPresence("email")
+            .withClaimPresence("userType")
+            .build()
+
+        override fun isValidToken(tokenString: String): Boolean {
+
+            return try {
+                jwtVerifier.verify(tokenString)
+                true
+            } catch (e: Exception) {
+                false
+            }
+        }
+
+        override fun produceToken(userType: User.Type, email: String): String {
+            return JWT.create()
+                .withAudience(audience)
+                .withIssuer(issuer)
+                .withClaim("email", email)
+                .withClaim("userType", userType.value)
+                .withExpiresAt(Date(System.currentTimeMillis() + expirationTime))
+                .sign(algorithm)
+        }
+
+        override fun decodeToken(tokenString: String): Pair<String, String> {
+            val jwt = JWT.decode(tokenString)
+            val email = jwt.getClaim("email").asString()
+            val userType = jwt.getClaim("userType").asString()
+
+            return userType to email
+        }
+    }
+  learner_created: true
+- name: src/presentation/routing/requestDto/SignInRequest.kt
+  visible: true
+  text: |-
+    package hotkitchen.presentation.routing.requestDto
+
+    import kotlinx.serialization.Serializable
+
+    @Serializable
+    data class SignInRequest (
+        val email: String,
+        val password: String,
+    )
+  learner_created: true
+- name: src/data/repository/database/exposed/UsersTable.kt
+  visible: true
+  text: |-
+    package hotkitchen.data.repository.database.exposed
+
+    import org.jetbrains.exposed.dao.id.IntIdTable
+    import org.jetbrains.exposed.sql.Column
+
+    object UsersTable : IntIdTable() {
+        val email: Column<String> = varchar("email", 100).uniqueIndex()
+        val password: Column<String> = varchar("password", 100)
+        val userType: Column<String> = varchar("user_type", 50)
+    }
+  learner_created: true
+- name: src/domain/model/UserInfo.kt
+  visible: true
+  learner_created: true
+- name: src/data/repository/database/exposed/UsersInfoTable.kt
+  visible: true
+  learner_created: true
+- name: src/presentation/routing/responseDto/UserInfoResponse.kt
+  visible: true
+  learner_created: true
+- name: src/data/repository/database/exposed/UserInfoEntity.kt
+  visible: true
+  learner_created: true
+- name: src/domain/exception/InvalidUpdateException.kt
+  visible: true
+  learner_created: true
+- name: src/data/repository/database/UserInfoDatabase.kt
+  visible: true
+  learner_created: true
+- name: src/domain/exception/InvalidDeleteUserRequestException.kt
+  visible: true
+  learner_created: true
+- name: src/data/repository/database/exposed/ExposedH2UserInfoDatabase.kt
+  visible: true
+  learner_created: true
+- name: src/domain/exception/InvalidUserInfoRequest.kt
+  visible: true
+  learner_created: true
+- name: src/domain/service/UserInfoService.kt
+  visible: true
+  learner_created: true
+- name: src/data/repository/UserInfoRepository.kt
+  visible: true
+  learner_created: true
+- name: src/presentation/routing/UserInfoRouting.kt
+  visible: true
+  learner_created: true
+- name: src/presentation/routing/requestDto/UserInfoUpdateRequest.kt
+  visible: true
+  learner_created: true
+- name: src/domain/service/UserCredentialsService.kt
+  visible: true
+  text: |-
+    package hotkitchen.domain.service
+
+    import hotkitchen.domain.exception.SigninAuthorizationFail
+    import hotkitchen.domain.exception.SignupInvalidEmailException
+    import hotkitchen.domain.exception.SignupInvalidPasswordException
+    import hotkitchen.presentation.routing.requestDto.SignInRequest
+    import hotkitchen.presentation.routing.requestDto.SignUpRequest
+    import hotkitchen.presentation.routing.responseDto.ApiResponse
+    import hotkitchen.presentation.routing.responseDto.TokenResponse
+    import hotkitchen.data.repository.UserRepository
+    import hotkitchen.domain.service.tokenService.TokenService
+    import hotkitchen.util.Validation.isNotValidEmail
+    import hotkitchen.util.Validation.isNotValidPass
+
+    class UserService(private val userRepository: UserRepository, private val tokenService: TokenService) {
+
+        fun signInUser(signInRequest: SignInRequest): ApiResponse {
+            val maybeUser = userRepository.getUser(signInRequest.email)
+
+            return if (maybeUser?.password != signInRequest.password) {
+                throw SigninAuthorizationFail()
+            } else {
+                TokenResponse(tokenService.produceToken(maybeUser.type, maybeUser.email))
+            }
+        }
+
+        fun signUpUser(signUpRequest: SignUpRequest): ApiResponse {
+            val (email, type, password) = signUpRequest
+
+            if(email.isNotValidEmail()) {
+                throw SignupInvalidEmailException()
+            } else if(password.isNotValidPass()) {
+                throw SignupInvalidPasswordException()
+            }
+
+            userRepository.addUser(email, type, password)
+            return TokenResponse(tokenService.produceToken(type, email))
+        }
+
+    }
+  learner_created: true
+- name: src/data/repository/UserCredentialsRepository.kt
+  visible: true
+  text: |-
+    package hotkitchen.data.repository
+
+    import hotkitchen.domain.exception.SignupExistingUserException
+    import hotkitchen.domain.exception.DatabaseException
+    import hotkitchen.data.repository.database.UserDatabase
+    import hotkitchen.domain.model.User
+
+    class UserRepository(private val userDatabase: UserDatabase) {
+
+        fun addUser(email: String, type: User.Type, password: String): User {
+            val maybeUser = userDatabase.userByEmail(email)
+
+            if(maybeUser != null) {
+                throw SignupExistingUserException("There is already an user with ${email} registered")
+            }
+
+            val maybeUserAdded = userDatabase.addUser(email, type, password)
+
+            return maybeUserAdded ?: throw DatabaseException()
+        }
+
+        fun getUser(email: String): User? {
+            return userDatabase.userByEmail(email)
+        }
+
+    }
+  learner_created: true
+- name: src/data/repository/database/UserCredentialsDatabase.kt
+  visible: true
+  text: |-
+    package hotkitchen.data.repository.database
+
+    import hotkitchen.domain.model.User
+
+    interface UserDatabase {
+        fun userByEmail(email: String): User?
+        fun addUser(email: String, type: User.Type, password: String): User?
+
+    }
+  learner_created: true
+- name: src/data/repository/database/InMemoryUserCredentialsDatabase.kt
+  visible: true
+  text: |-
+    package hotkitchen.data.repository.database
+
+    import hotkitchen.domain.model.User
+
+    object InMemoryUserDatabase: UserDatabase {
+
+        private val database: MutableList<User> = mutableListOf()
+
+        override fun userByEmail(email: String): User? {
+            return database.firstOrNull { it.email == email }
+        }
+
+        override fun addUser(email: String, type: User.Type, password: String): User? {
+            val user = User(email, type, password)
+            database.add(user)
+            return user
+        }
+    }
+  learner_created: true
+- name: src/data/repository/database/exposed/ExposedH2UserCredentialsDatabase.kt
+  visible: true
+  text: |-
+    package hotkitchen.data.repository.database.exposed
+
+    import hotkitchen.data.repository.database.UserDatabase
+    import hotkitchen.domain.model.User
+    import org.jetbrains.exposed.sql.Database
+    import org.jetbrains.exposed.sql.transactions.transaction
+
+    class ExposedH2UserDatabase(private val database: Database): UserDatabase {
+        override fun userByEmail(email: String): User? {
+            return transaction(database) {
+                UserEntity.find {
+                    UsersTable.email eq email
+                }.firstOrNull()
+                    ?.toUser()
+            }
+        }
+
+        override fun addUser(email: String, type: User.Type, password: String): User? {
+            return try {
+                transaction(database) {
+                    UserEntity.new {
+                        this.email = email
+                        this.userType = type.name
+                        this.password = password
+                    }
+                }.toUser()
+            } catch (e: Exception) {
+                null
+            }
+        }
+    }
+  learner_created: true
+feedback_link: https://hyperskill.org/learn/step/22605#comment
+status: Solved
+feedback:
+  message: Congratulations!
+  time: Fri, 21 Oct 2022 22:28:28 UTC
+record: 3

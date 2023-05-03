@@ -1,0 +1,3 @@
+package hotkitchen.presentation.routing.responseDto
+
+interface ApiResponse
